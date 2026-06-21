@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
-import { mkdir, opendir, stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
@@ -13,6 +13,7 @@ import {
   type LoadedSkills,
   type SkillReadResolution,
 } from "./skills.js";
+import { walkWorkspace } from "./workspace-ignore.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -261,13 +262,18 @@ export class WorkspaceRegistry {
     const loadedPaths = new Set(loadedFiles.map((file) => resolve(file.path)));
     const discovered: AvailableAgentsFile[] = [];
 
-    await walkWorkspace(root, async (path, entry) => {
-      if (!entry.isFile()) return;
-      if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
-      if (loadedPaths.has(path)) return;
+    await walkWorkspace(
+      root,
+      async (path, entry) => {
+        if (!entry.isFile()) return;
+        if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
+        if (loadedPaths.has(path)) return;
 
-      discovered.push({ path });
-    });
+        discovered.push({ path });
+      },
+      SKIPPED_CONTEXT_DIRS,
+      CONTEXT_FILE_NAMES,
+    );
 
     return discovered.sort((a, b) => a.path.localeCompare(b.path));
   }
@@ -301,28 +307,4 @@ export function formatAgentsPath(path: string, workspaceRoot: string | undefined
   }
 
   return relationship.split(sep).join("/");
-}
-
-async function walkWorkspace(
-  directory: string,
-  visit: (path: string, entry: { name: string; isFile(): boolean; isDirectory(): boolean }) => Promise<void> | void,
-): Promise<void> {
-  let entries;
-  try {
-    entries = await opendir(directory);
-  } catch {
-    return;
-  }
-
-  for await (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) {
-        await walkWorkspace(path, visit);
-      }
-      continue;
-    }
-
-    await visit(path, entry);
-  }
 }
