@@ -31,6 +31,35 @@ interface ToolContext {
   readRoots?: string[];
 }
 
+interface CachedTools {
+  read: ReturnType<typeof createReadTool>;
+  write: ReturnType<typeof createWriteTool>;
+  edit: ReturnType<typeof createEditTool>;
+  grep: ReturnType<typeof createGrepTool>;
+  find: ReturnType<typeof createFindTool>;
+  ls: ReturnType<typeof createLsTool>;
+  bash: ReturnType<typeof createBashTool>;
+}
+
+const toolCache = new Map<string, CachedTools>();
+
+function getCachedTools(cwd: string): CachedTools {
+  let cached = toolCache.get(cwd);
+  if (!cached) {
+    cached = {
+      read: createReadTool(cwd),
+      write: createWriteTool(cwd),
+      edit: createEditTool(cwd),
+      grep: createGrepTool(cwd),
+      find: createFindTool(cwd),
+      ls: createLsTool(cwd),
+      bash: createBashTool(cwd),
+    };
+    toolCache.set(cwd, cached);
+  }
+  return cached;
+}
+
 function toMcpContent(result: AgentToolResult<unknown>): McpContent[] {
   return result.content.map((content) => {
     if (content.type === "text") {
@@ -68,7 +97,7 @@ async function runTool<TInput, TDetails = unknown>(
 
 export async function readFileTool(input: ReadToolInput, context: ToolContext): Promise<ToolResponse> {
   const path = resolveAllowedPath(input.path, context.cwd, context.readRoots ?? [context.root]);
-  const tool = createReadTool(context.cwd);
+  const tool = getCachedTools(context.cwd).read;
 
   return runTool((params) => tool.execute("read_file", params), {
     path,
@@ -79,7 +108,7 @@ export async function readFileTool(input: ReadToolInput, context: ToolContext): 
 
 export async function writeFileTool(input: WriteToolInput, context: ToolContext): Promise<ToolResponse> {
   const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
-  const tool = createWriteTool(context.cwd);
+  const tool = getCachedTools(context.cwd).write;
 
   return runTool((params) => tool.execute("write_file", params), {
     path,
@@ -89,7 +118,7 @@ export async function writeFileTool(input: WriteToolInput, context: ToolContext)
 
 export async function editFileTool(input: EditToolInput, context: ToolContext): Promise<ToolResponse<EditToolDetails>> {
   const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
-  const tool = createEditTool(context.cwd);
+  const tool = getCachedTools(context.cwd).edit;
 
   return runTool((params) => tool.execute("edit_file", params), {
     path,
@@ -99,27 +128,27 @@ export async function editFileTool(input: EditToolInput, context: ToolContext): 
 
 export async function grepFilesTool(input: GrepToolInput, context: ToolContext): Promise<ToolResponse> {
   if (input.path) resolveAllowedPath(input.path, context.cwd, [context.root]);
-  const tool = createGrepTool(context.cwd);
+  const tool = getCachedTools(context.cwd).grep;
 
   return runTool((params) => tool.execute("grep_files", params), input, context);
 }
 
 export async function findFilesTool(input: FindToolInput, context: ToolContext): Promise<ToolResponse> {
   if (input.path) resolveAllowedPath(input.path, context.cwd, [context.root]);
-  const tool = createFindTool(context.cwd);
+  const tool = getCachedTools(context.cwd).find;
 
   return runTool((params) => tool.execute("find_files", params), input, context);
 }
 
 export async function listDirectoryTool(input: LsToolInput, context: ToolContext): Promise<ToolResponse> {
   if (input.path) resolveAllowedPath(input.path, context.cwd, [context.root]);
-  const tool = createLsTool(context.cwd);
+  const tool = getCachedTools(context.cwd).ls;
 
   return runTool((params) => tool.execute("list_directory", params), input, context);
 }
 
 export async function runShellTool(input: BashToolInput, context: ToolContext): Promise<ToolResponse> {
-  const tool = createBashTool(context.cwd);
+  const tool = getCachedTools(context.cwd).bash;
   const timeout = input.timeout === undefined ? 30 : Math.min(input.timeout, 300);
 
   return runTool((params) => tool.execute("run_shell", params), {

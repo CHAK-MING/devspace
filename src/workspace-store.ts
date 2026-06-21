@@ -37,6 +37,7 @@ export interface WorkspaceStore {
 
 export class SqliteWorkspaceStore implements WorkspaceStore {
   private readonly database: DatabaseHandle;
+  private readonly touchCache = new Map<string, number>();
 
   constructor(stateDir: string) {
     this.database = openDatabase(stateDir);
@@ -95,6 +96,10 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
   }
 
   touchSession(id: string): void {
+    const now = Date.now();
+    const last = this.touchCache.get(id) ?? 0;
+    if (now - last < 60_000) return;
+    this.touchCache.set(id, now);
     this.database.db
       .update(workspaceSessions)
       .set({ lastUsedAt: new Date().toISOString() })

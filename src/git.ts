@@ -31,8 +31,9 @@ export async function git(
 }
 
 export async function getGitEligibility(cwd: string): Promise<GitEligibility> {
+  let gitRoot: string;
   try {
-    await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+    gitRoot = (await git(cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
   } catch {
     return {
       ok: false,
@@ -41,7 +42,6 @@ export async function getGitEligibility(cwd: string): Promise<GitEligibility> {
     };
   }
 
-  const gitRoot = (await git(cwd, ["rev-parse", "--show-toplevel"])).stdout.trim();
   try {
     await git(gitRoot, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
   } catch {

@@ -373,8 +373,9 @@ function uiManifestUrl(): URL {
   return new URL("../dist/ui/.vite/manifest.json", import.meta.url);
 }
 
+let cachedWorkspaceAppManifest: WorkspaceAppManifest | undefined;
 function readWorkspaceAppManifest(): WorkspaceAppManifest {
-  return JSON.parse(readFileSync(uiManifestUrl(), "utf8")) as WorkspaceAppManifest;
+  return (cachedWorkspaceAppManifest ??= JSON.parse(readFileSync(uiManifestUrl(), "utf8")) as WorkspaceAppManifest);
 }
 
 function getWorkspaceAppManifestEntry(): WorkspaceAppManifestEntry {

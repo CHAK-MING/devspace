@@ -1,6 +1,5 @@
 import ignore from "ignore";
-import { readdirSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
 const IGNORE_FILE_NAMES = [".gitignore", ".devspaceignore"];
@@ -10,10 +9,10 @@ interface IgnoreFrame {
   ig: ReturnType<typeof ignore>;
 }
 
-type Entries = ReturnType<typeof readDirents>;
-function readDirents(dir: string) {
+type Entries = Awaited<ReturnType<typeof readDirents>>;
+async function readDirents(dir: string) {
   try {
-    return readdirSync(dir, { withFileTypes: true });
+    return await readdir(dir, { withFileTypes: true });
   } catch {
     return null;
   }
@@ -42,7 +41,7 @@ export async function walkWorkspace(
   alwaysVisitFiles?: Set<string>,
 ): Promise<void> {
   async function recurse(dir: string, stack: IgnoreFrame[]): Promise<void> {
-    const entries: Entries = readDirents(dir);
+    const entries: Entries = await readDirents(dir);
     if (!entries) return;
 
     let childStack = stack;
