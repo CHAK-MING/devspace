@@ -192,42 +192,6 @@ If rebase conflicts occur, they should only be in:
 
 All other changes are in a **new file** (`src/workspace-ignore.ts`) → zero conflict risk.
 
-## Update Workflow (One-Liner)
-
-For a remote machine via SSH:
-
-```bash
-ssh user@host 'export NVM_DIR=$HOME/.nvm; source $NVM_DIR/nvm.sh; \
-  cd ~/devspace-fork && \
-  git fetch upstream && \
-  git rebase upstream/main local-patches && \
-  npm install && \
-  npm run build && \
-  chmod +x dist/cli.js && \
-  pkill -KILL -f "devspace serve"; \
-  sleep 1; \
-  nohup bash -c '\''trap "" HUP TERM; \
-    export NVM_DIR=$HOME/.nvm; source $NVM_DIR/nvm.sh; \
-    export DEVSPACE_WIDGETS=off; \
-    export DEVSPACE_TRUST_PROXY=1; \
-    exec devspace serve'\'' \
-    > ~/.devspace/logs/serve.log 2>&1 < /dev/null & disown'
-```
-
-## Performance Audit (Reference)
-
-Network is usually the bottleneck once DevSpace is patched. Typical RTTs via Cloudflare Tunnel:
-
-| Path | Network RTT | Notes |
-|---|---|---|
-| ChatGPT (US/India) → CF SG → Mac CN | **~150 ms** | Best case (residential or VPN to SG) |
-| ChatGPT (US/India) → CF sjc → China IDC | **~750 ms** | Direct ChinaTelecom routes to US west |
-| Local loopback (DevSpace ↔ cloudflared) | **<10 ms** | Negligible |
-| DevSpace `read` (single file) | **3-5 ms** | |
-| DevSpace `bash` | **10-50 ms** | Depends on command |
-| DevSpace `open_workspace` (warm) | **22 ms** | After patch |
-| DevSpace `open_workspace` (cold) | **53 ms** | After patch |
-
 ## Debugging
 
 ```bash
