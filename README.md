@@ -1,214 +1,270 @@
-<p align="center">
-  <picture>
-    <img src="https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-logo-light.png" alt="DevSpace logo" width="140">
-  </picture>
-</p>
+# DevSpace (Fork with Performance Patches)
 
-<h1 align="center">DevSpace</h1>
+> **Private fork** of [`Waishnav/devspace`](https://github.com/Waishnav/devspace) with local performance patches.
+> Not for public consumption. No PRs opened against upstream.
+> Upstream README preserved as [`UPSTREAM_README.md`](./UPSTREAM_README.md).
 
-<p align="center">Bring a Codex-style coding workflow to ChatGPT.</p>
+DevSpace is a self-hosted MCP server that lets ChatGPT read, edit, search, and run code in your local projects. This fork adds **performance optimizations** for large workspaces (100K+ files).
 
-<p align="center">
-  <a href="https://www.npmjs.com/package/@waishnav/devspace"><img alt="npm" src="https://img.shields.io/npm/v/%40waishnav%2Fdevspace?style=flat-square" /></a>
-  <a href="https://github.com/Waishnav/devspace/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Waishnav/devspace/ci.yml?style=flat-square&branch=main" /></a>
-  <a href="https://github.com/Waishnav/devspace/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/npm/l/%40waishnav%2Fdevspace?style=flat-square" /></a>
-</p>
+## What's Modified
 
-[![DevSpace connected to ChatGPT](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)
+All changes are isolated to the `local-patches` branch. The `main` branch stays in sync with upstream.
 
-**Give ChatGPT a secure connection to your own machine and Turn ChatGPT into Codex**
+| # | File | Change | Impact |
+|---|------|--------|--------|
+| 1 | `src/workspace-ignore.ts` (NEW) | `walkWorkspace` respects `.gitignore` + `.devspaceignore` hierarchically | **97x faster** walk on gitignored workspaces |
+| 2 | `src/workspace-ignore.ts` | `readdirSync` → `async readdir` | Non-blocking event loop, ~40% faster on raw walk |
+| 3 | `src/server.ts` | `readWorkspaceAppManifest()` cached at module load | Eliminates per-widget `readFileSync` |
+| 4 | `src/workspace-store.ts` | `touchSession()` throttled to 1/min per workspace | Eliminates per-tool-call SQLite `UPDATE` |
+| 5 | `src/git.ts` | `getGitEligibility` 3 spawns → 2 | `rev-parse --show-toplevel` already implies inside-work-tree |
+| 6 | `src/pi-tools.ts` | Tool instances cached by `cwd` | Eliminates `createXxxTool(cwd)` per call |
+| 7 | `src/workspaces.ts` | Removed local `walkWorkspace`, imports from `workspace-ignore.ts` | Net -7 lines |
+| 8 | `package.json` | Added `ignore@^7.0.5` dependency | Hierarchical gitignore parsing |
 
-DevSpace is a self-hosted MCP server that lets ChatGPT read, edit, search, and run code in your real local projects — your files, your tools, your terminal — without uploading anything to a third party. You run it on your machine, expose it through a tunnel you control, and approve the connection with a password only you have.
+## Benchmarks
 
-## Sponsors and Special Thanks
+Real production numbers on a **143,448-file / 26GB workspace** (`/home/chakming/paper/PMalloc_new`):
 
-<table>
-  <thead>
-    <tr>
-      <th>Sponsor</th>
-      <th>About</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td align="center" width="220">
-        <a href="https://rebates.ai/">
-          <img
-            src="https://app.rebates.ai/brand/rebates-lockup.svg"
-            alt="Rebates"
-            width="170"
-          >
-        </a>
-      </td>
-      <td>
-        <strong>The ads in your terminal pay you.</strong><br><br>
-        <a href="https://rebates.ai/">Rebates</a> adds one optional
-        sponsored footer to your coding agent and pays you cash back for every
-        session in which it is shown. Turn it off at any time.
-      </td>
-    </tr>
-  </tbody>
-</table>
+| Metric | Upstream v1.0.2 | This Fork | Improvement |
+|---|---|---|---|
+| `walkWorkspace` (with `.gitignore`) | 2,158 ms, 143K files | **22 ms, 30 files** | **97x** |
+| `walkWorkspace` (no `.gitignore`) | ~2,158 ms | **1,318 ms** | ~1.6x |
+| `open_workspace` MCP tool | 2,163 ms | **53 ms** | **40x** |
+| Per-tool-call overhead | +1-2 ms (SQLite UPDATE) | +0 ms (throttled) | -100% |
 
-<p align="center">
-  DevSpace is open to new sponsors.
-  <a href="https://x.com/wshxnv">Get in touch to become one.</a>
-</p>
+## Prerequisites
 
-## Installation
+- **Node.js** v22+ (recommend [nvm](https://github.com/nvm-sh/nvm))
+- **npm** v10+
+- **git**
+- **ripgrep** and **fd** (auto-downloaded by DevSpace on first use to `~/.pi/agent/bin/`)
+- For public access: **Cloudflare Tunnel** (or ngrok / Caddy + port forward)
 
-DevSpace requires Node `>=20.12 <27`. Node 22 LTS is recommended.
-
-Install the DevSpace CLI:
+## Deploy on a New Machine
 
 ```bash
-npm install -g @waishnav/devspace
+# 1. Clone the fork
+git clone -b local-patches git@github.com:CHAK-MING/devspace.git ~/devspace-fork
+cd ~/devspace-fork
+
+# 2. Install deps + build
+npm ci
+npm run build
+chmod +x dist/cli.js        # CRITICAL: tsc resets dist/cli.js to 644
+
+# 3. Replace global install
+npm uninstall -g @waishnav/devspace 2>/dev/null
+npm link                     # global symlink → ~/devspace-fork/dist/cli.js
+
+# 4. Verify
+devspace --version
 ```
 
-Then initialize and start the server:
+## Configure DevSpace
 
 ```bash
-devspace init
+# Set allowed workspace root (REQUIRED)
+devspace config set allowedRoots "/absolute/path/to/your/workspace"
+
+# Optional overrides
+devspace config set host 127.0.0.1
+devspace config set port 7676
+devspace config set publicBaseUrl https://your.domain.com
+```
+
+Config lives at `~/.devspace/config.json`. The **Owner password** (for OAuth flow) is auto-generated on first run and stored at `~/.devspace/auth.json` — back it up.
+
+## Run DevSpace
+
+**Foreground** (for testing):
+```bash
 devspace serve
 ```
 
-Or run it without a global install:
+**Background** (survives shell exit):
+```bash
+mkdir -p ~/.devspace/logs
+nohup bash -c 'trap "" HUP TERM; \
+  export DEVSPACE_WIDGETS=full; \
+  export DEVSPACE_TRUST_PROXY=1; \
+  exec devspace serve' \
+  > ~/.devspace/logs/serve.log 2>&1 < /dev/null & disown
+```
+
+To kill a backgrounded instance (it blocks SIGTERM, must use SIGKILL):
+```bash
+ps -u $USER -o pid,command | grep "devspace serve" | grep -v grep
+kill -KILL <PID>
+```
+
+## Environment Variables
+
+| Var | Values | Effect |
+|---|---|---|
+| `DEVSPACE_WIDGETS` | `full` \| `changes` \| `off` | Widget rendering mode. Use `off` on high-latency links to avoid ChatGPT widget-fetch timeouts. |
+| `DEVSPACE_TRUST_PROXY` | `1` \| `0` | Trust `X-Forwarded-For` from reverse proxy (Cloudflare Tunnel, ngrok). Required when behind proxy. |
+| `DEVSPACE_LOG_TOOL_CALLS` | `1` \| `0` | Log every tool call with duration. Useful for debugging perf. |
+
+## Cloudflare Tunnel Setup
+
+DevSpace has **no built-in tunnel**. For HTTPS access (required by ChatGPT Desktop connectors), use Cloudflare Tunnel:
+
+1. **Create a tunnel** at [one.dash.cloudflare.com](https://one.dash.cloudflare.com/) → Networks → Tunnels → Create Tunnel.
+2. **Install cloudflared** on the machine running DevSpace:
+   ```bash
+   # macOS
+   brew install cloudflared
+   # Linux
+   curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+   chmod +x /usr/local/bin/cloudflared
+   ```
+3. **Run cloudflared** (replace `<TOKEN>` with your tunnel token):
+   ```bash
+   # macOS
+   sudo nohup /opt/homebrew/bin/cloudflared tunnel run --token <TOKEN> > /tmp/cloudflared.log 2>&1 & disown
+
+   # Linux (systemd)
+   sudo tee /etc/systemd/system/cloudflared.service > /dev/null <<EOF
+   [Unit]
+   Description=Cloudflared Tunnel
+   After=network-online.target
+   Wants=network-online.target
+   [Service]
+   Type=notify
+   ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token <TOKEN>
+   Restart=on-failure
+   RestartSec=5s
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now cloudflared
+   ```
+4. **Add public hostname** in CF dashboard:
+   - Subdomain: e.g. `devspace`
+   - Domain: your domain
+   - Type: `HTTP`
+   - URL: `127.0.0.1:7676`
+5. **DNS**: CF auto-creates a CNAME `<sub>.<domain>` → `<tunnel-uuid>.cfargotunnel.com`.
+
+## ChatGPT Connector Setup
+
+ChatGPT Desktop requires **HTTPS** (won't accept `http://127.0.0.1`).
+
+1. Open ChatGPT Desktop → **Settings** → **Apps & Connectors**.
+2. Scroll to bottom → expand **Advanced settings** → toggle **Developer Mode** on.
+3. Click **Create** (appears after enabling Developer Mode).
+4. Enter MCP server URL: `https://devspace.<your-domain>/mcp`.
+5. Browser opens OAuth flow → enter your **DevSpace Owner password** (from `~/.devspace/auth.json`).
+
+## Workspace Optimization Tips
+
+- **Add `.gitignore`** to your workspace. The patched `walkWorkspace` respects it hierarchically.
+- **Add `.devspaceignore`** for DevSpace-specific exclusions (additive to `.gitignore`).
+- Common heavy dirs to exclude: `node_modules/`, `dist/`, `build/`, `.next/`, `.turbo/`, `target/`, `vendor/`, `__pycache__/`, `.venv/`, `.zig-cache/`, `zig-out/`, `.gradle/`, `.idea/`.
+
+## Maintenance: Sync with Upstream
+
+This fork tracks `Waishnav/devspace` main branch. Upstream is **very active** (multiple commits/day). Rebase regularly:
 
 ```bash
-npx @waishnav/devspace init
-npx @waishnav/devspace serve
-```
+cd ~/devspace-fork
 
-During setup, DevSpace asks for:
+# One-time: add upstream remote
+git remote add upstream https://github.com/Waishnav/devspace.git
 
-- the local project folders ChatGPT is allowed to open through DevSpace
-- the local port, usually `7676`
-- your public HTTPS base URL from Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or
-  another reverse proxy
-
-Use the public origin without `/mcp` during setup:
-
-```text
-https://your-tunnel-host.example.com
-```
-
-You will configure your MCP client with the public `/mcp` URL after setup.
-
-When the client connects, DevSpace opens an Owner password approval page. Enter
-the Owner password printed by `devspace init`. It is also stored in:
-
-```text
-~/.devspace/auth.json
-```
-
-Keep that password private.
-
-## Connect Your MCP Client
-
-The default local endpoint is:
-
-```text
-http://127.0.0.1:7676/mcp
-```
-
-Most users should connect through a public HTTPS tunnel:
-
-```text
-https://your-tunnel-host.example.com/mcp
-```
-
-## What ChatGPT Can Do
-
-Once connected, ChatGPT can open one of your approved project folders as a
-workspace. From there, it can inspect the repo, make scoped edits, run commands,
-and show you what changed.
-
-DevSpace gives ChatGPT tools to:
-
-- read, write, and edit files inside the opened workspace
-- search code and inspect directories
-- run shell commands for tests, builds, git, and package scripts
-- use isolated Git worktrees for parallel coding sessions
-- follow project instructions from `AGENTS.md` and `CLAUDE.md`
-- discover local agent skills from your skill folders
-- show tool cards and optional change summaries in ChatGPT Apps-compatible hosts
-
-## Mental Model
-
-DevSpace is remote access to selected local folders.
-
-You decide which roots are allowed. The MCP client still has powerful local
-capabilities inside an opened workspace, including shell execution. Treat a
-connected client like a trusted coding partner with access to your machine.
-
-For a normal ChatGPT coding session:
-
-1. Start your tunnel.
-2. Run `devspace serve`.
-3. Connect the MCP client to your public `/mcp` URL.
-4. Approve the connection with the Owner password.
-5. Ask ChatGPT to open a project inside one of your allowed roots.
-
-## Platform Support
-
-DevSpace supports Linux, macOS, and Windows environments with a Bash-compatible
-shell.
-
-| Platform                                          | Status            | Notes                                          |
-| ------------------------------------------------- | ----------------- | ---------------------------------------------- |
-| Linux                                             | Supported         | Requires Node, npm, Git, and Bash.             |
-| macOS                                             | Supported         | Requires Node, npm, Git, and Bash.             |
-| Windows with Git Bash, WSL, MSYS2, or Cygwin Bash | Supported         | Git Bash is the simplest native Windows setup. |
-| Windows PowerShell or `cmd.exe` only              | Not supported yet | Install Git Bash or use WSL.                   |
-
-Run this to inspect your local setup:
-
-```bash
-devspace doctor
-```
-
-## Documentation
-
-- [Setup Guide](https://github.com/Waishnav/devspace/blob/main/docs/setup.md)
-- [ChatGPT Coding Workflow](https://github.com/Waishnav/devspace/blob/main/docs/chatgpt-coding-workflow.md)
-- [Configuration Reference](https://github.com/Waishnav/devspace/blob/main/docs/configuration.md)
-- [Security Model](https://github.com/Waishnav/devspace/blob/main/docs/security.md)
-- [Troubleshooting Gotchas](https://github.com/Waishnav/devspace/blob/main/docs/gotchas.md)
-
-## Philosophy
-
-Every piece of software is becoming conversational. Natural language is
-redefining how we interact with tools, workflows, and systems.
-
-My bet is that ChatGPT becomes the operating system for everything. Once we
-reach AGI, we will simply talk to ChatGPT, and it will prompt, coordinate, and
-orchestrate sub-agents that set up the right loops for us.
-
-We are not there yet.
-
-DevSpace is one attempt to fast-forward that future: a way for MCP-capable
-hosts like ChatGPT and Claude to work directly with local project files through
-explicit, inspectable tools.
-
-## Built by Waishnav
-
-I'm Waishnav, the creator of [GitCMS](https://gitcms.dev/), a Git-backed CMS
-for markdown sites.
-
-I like building opinionated products, and DevSpace is another example of that.
-I'm on a journey to build a single-person company doing multiple millions in
-revenue. If you want to watch the failures, wins, lessons, and everything in
-between, come hang out with me on [X](https://x.com/wshxnv).
-
-## Local Development
-
-For working on DevSpace itself:
-
-```bash
-npm install --include=dev
-npm run dev
-npm run typecheck
-npm test
+# Sync + rebuild + restart
+git fetch upstream
+git rebase upstream/main local-patches
+npm install            # in case deps changed
 npm run build
-npm run start
+chmod +x dist/cli.js   # CRITICAL: tsc resets mode
+
+# Restart serve (kill old PID first)
+pkill -KILL -f "devspace serve"
+nohup bash -c 'trap "" HUP TERM; exec devspace serve' \
+  > ~/.devspace/logs/serve.log 2>&1 < /dev/null & disown
 ```
+
+If rebase conflicts occur, they should only be in:
+- `src/workspaces.ts` (around `findAvailableAgentsFiles` call site — 1-2 lines)
+- `package.json` (`ignore` dependency line)
+
+All other changes are in a **new file** (`src/workspace-ignore.ts`) → zero conflict risk.
+
+## Update Workflow (One-Liner)
+
+For a remote machine via SSH:
+
+```bash
+ssh user@host 'export NVM_DIR=$HOME/.nvm; source $NVM_DIR/nvm.sh; \
+  cd ~/devspace-fork && \
+  git fetch upstream && \
+  git rebase upstream/main local-patches && \
+  npm install && \
+  npm run build && \
+  chmod +x dist/cli.js && \
+  pkill -KILL -f "devspace serve"; \
+  sleep 1; \
+  nohup bash -c '\''trap "" HUP TERM; \
+    export NVM_DIR=$HOME/.nvm; source $NVM_DIR/nvm.sh; \
+    export DEVSPACE_WIDGETS=off; \
+    export DEVSPACE_TRUST_PROXY=1; \
+    exec devspace serve'\'' \
+    > ~/.devspace/logs/serve.log 2>&1 < /dev/null & disown'
+```
+
+## Performance Audit (Reference)
+
+Network is usually the bottleneck once DevSpace is patched. Typical RTTs via Cloudflare Tunnel:
+
+| Path | Network RTT | Notes |
+|---|---|---|
+| ChatGPT (US/India) → CF SG → Mac CN | **~150 ms** | Best case (residential or VPN to SG) |
+| ChatGPT (US/India) → CF sjc → China IDC | **~750 ms** | Direct ChinaTelecom routes to US west |
+| Local loopback (DevSpace ↔ cloudflared) | **<10 ms** | Negligible |
+| DevSpace `read` (single file) | **3-5 ms** | |
+| DevSpace `bash` | **10-50 ms** | Depends on command |
+| DevSpace `open_workspace` (warm) | **22 ms** | After patch |
+| DevSpace `open_workspace` (cold) | **53 ms** | After patch |
+
+## Debugging
+
+```bash
+# Live tail logs
+tail -f ~/.devspace/logs/serve.log
+
+# Check cloudflared edge assignment
+curl -s http://localhost:20241/metrics | grep edge_location
+
+# Test endpoint locally
+curl -sw "\n%{time_total}s HTTP %{http_code}\n" -o /dev/null http://127.0.0.1:7676/mcp
+
+# Benchmark walkWorkspace standalone
+cd ~/devspace-fork && node -e '
+  import("./dist/workspace-ignore.js").then(async m => {
+    const t = performance.now(); let n = 0;
+    await m.walkWorkspace("/path/to/workspace", async () => n++,
+      new Set([".git",".hg",".svn",".devspace","node_modules","dist","build",".next",".turbo",".cache"]),
+      new Set(["AGENTS.md","AGENTS.MD","CLAUDE.md","CLAUDE.MD"]));
+    console.log(`walk: ${(performance.now()-t).toFixed(1)}ms, ${n} files`);
+  });
+'
+```
+
+## Branch Strategy
+
+```
+main              ← tracks upstream/main (never commit here)
+local-patches     ← fork patches, rebased on main
+```
+
+## License
+
+Inherits upstream [MIT License](./LICENSE).
+
+## Acknowledgments
+
+- Original work: [Waishnav/devspace](https://github.com/Waishnav/devspace)
+- Upstream README: [`UPSTREAM_README.md`](./UPSTREAM_README.md)
+- `ignore` npm package: [ignore](https://github.com/kaelzhang/node-ignore)
