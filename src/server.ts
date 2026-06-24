@@ -158,6 +158,8 @@ interface ToolLogFields {
   success: boolean;
   durationMs: number;
   error?: string;
+  stepMs?: Record<string, number>;
+  filesScanned?: number;
 }
 
 function toolNamesFor(config: ServerConfig): ToolNames {
@@ -266,13 +268,18 @@ function requestLogFields(req: Request, config: ServerConfig): Record<string, un
   };
 }
 
+const SLOW_COMMAND_THRESHOLD_MS = 500;
+
 function logToolCall(config: ServerConfig, fields: ToolLogFields): void {
   if (!config.logging.toolCalls) return;
 
-  const { command, ...safeFields } = fields;
+  const { command, stepMs, filesScanned, ...safeFields } = fields;
+  const showCommand = command && (config.logging.shellCommands || safeFields.durationMs >= SLOW_COMMAND_THRESHOLD_MS);
   logEvent(config.logging, fields.success ? "info" : "warn", "tool_call", {
     ...safeFields,
-    commandPreview: config.logging.shellCommands && command ? commandPreview(command) : undefined,
+    commandPreview: showCommand ? commandPreview(command) : undefined,
+    ...(stepMs ? { stepMs } : {}),
+    ...(filesScanned !== undefined ? { filesScanned } : {}),
   });
 }
 
@@ -553,7 +560,7 @@ function createMcpServer(
     },
     async ({ path, mode, baseRef }) => {
       const startedAt = performance.now();
-      const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
+      const { workspace, agentsFiles, availableAgentsFiles, stepMs, filesScanned } = await workspaces.openWorkspace({ path, mode, baseRef });
       if (config.widgets === "changes") {
         void reviewCheckpoints.initializeWorkspace({
           workspaceId: workspace.id,
@@ -603,6 +610,8 @@ function createMcpServer(
         path: workspace.root,
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
+        stepMs,
+        filesScanned,
       });
 
       return {

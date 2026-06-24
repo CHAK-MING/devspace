@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
 import { mkdir, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -48,6 +49,8 @@ export interface WorkspaceContext {
   workspace: Workspace;
   agentsFiles: LoadedAgentsFile[];
   availableAgentsFiles: AvailableAgentsFile[];
+  stepMs: { skills: number; agentsFiles: number; walkWorkspace: number };
+  filesScanned: number;
 }
 
 export interface WorkspaceReadPath {
@@ -194,6 +197,7 @@ export class WorkspaceRegistry {
     sourceRoot?: string;
     worktree?: WorkspaceWorktree;
   }): Promise<WorkspaceContext> {
+    const t0 = performance.now();
     const workspace: Workspace = {
       id: `ws_${randomUUID()}`,
       root: input.root,
@@ -203,6 +207,7 @@ export class WorkspaceRegistry {
       ...this.loadSkillsForWorkspace(input.root),
       activatedSkillDirs: new Set(),
     };
+    const t1 = performance.now();
 
     this.store?.createSession({
       id: workspace.id,
@@ -215,9 +220,22 @@ export class WorkspaceRegistry {
     });
     this.workspaces.set(workspace.id, workspace);
     const agentsFiles = this.loadInitialAgentsFiles(workspace.root);
-    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const t2 = performance.now();
 
-    return { workspace, agentsFiles, availableAgentsFiles };
+    const { files: availableAgentsFiles, filesScanned } = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const t3 = performance.now();
+
+    return {
+      workspace,
+      agentsFiles,
+      availableAgentsFiles,
+      stepMs: {
+        skills: Math.round(t1 - t0),
+        agentsFiles: Math.round(t2 - t1),
+        walkWorkspace: Math.round(t3 - t2),
+      },
+      filesScanned,
+    };
   }
 
   private loadSkillsForWorkspace(root: string): Pick<Workspace, "skills" | "skillDiagnostics"> {
@@ -258,14 +276,16 @@ export class WorkspaceRegistry {
   private async findAvailableAgentsFiles(
     root: string,
     loadedFiles: LoadedAgentsFile[],
-  ): Promise<AvailableAgentsFile[]> {
+  ): Promise<{ files: AvailableAgentsFile[]; filesScanned: number }> {
     const loadedPaths = new Set(loadedFiles.map((file) => resolve(file.path)));
     const discovered: AvailableAgentsFile[] = [];
+    let filesScanned = 0;
 
     await walkWorkspace(
       root,
-      async (path, entry) => {
+      (path, entry) => {
         if (!entry.isFile()) return;
+        filesScanned++;
         if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
         if (loadedPaths.has(path)) return;
 
@@ -275,7 +295,7 @@ export class WorkspaceRegistry {
       CONTEXT_FILE_NAMES,
     );
 
-    return discovered.sort((a, b) => a.path.localeCompare(b.path));
+    return { files: discovered.sort((a, b) => a.path.localeCompare(b.path)), filesScanned };
   }
 }
 
