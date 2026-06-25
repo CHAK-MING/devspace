@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, sep } from "node:path";
 import {
@@ -7,6 +8,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
+
+// Common agent skill directories beyond the default .pi/skills.
+// Auto-detected per workspace if present; added to skillPaths before loadSkills.
+const EXTRA_SKILL_DIRS = [".agents/skills", ".claude/skills", ".codemaker/skills"];
 
 export interface LoadedSkills {
   skills: Skill[];
@@ -22,10 +27,17 @@ export interface SkillReadResolution {
 export function loadWorkspaceSkills(config: ServerConfig, cwd: string): LoadedSkills {
   if (!config.skillsEnabled) return { skills: [], diagnostics: [] };
 
+  // Auto-detect common agent skill directories alongside .pi/skills.
+  // Only adds paths that actually exist (avoids noisy "path does not exist" diagnostics).
+  const detected = EXTRA_SKILL_DIRS
+    .map((rel) => resolve(cwd, rel))
+    .filter((p) => existsSync(p));
+  const skillPaths = [...new Set([...config.skillPaths, ...detected])];
+
   return loadSkills({
     cwd,
     agentDir: config.agentDir,
-    skillPaths: config.skillPaths,
+    skillPaths,
     includeDefaults: true,
   });
 }
