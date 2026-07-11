@@ -18,6 +18,7 @@ export interface StartCommandInput {
   workspaceId: string;
   command: string;
   cwd: string;
+  workspaceRoot?: string;
   tty?: boolean;
   columns?: number;
   rows?: number;
@@ -90,7 +91,10 @@ function terminalSize(value: number | undefined, fallback: number): number {
   return value;
 }
 
-function processEnvironment(): Record<string, string> {
+function processEnvironment(input?: {
+  workspaceId?: string;
+  workspaceRoot?: string;
+}): Record<string, string> {
   return {
     ...Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -103,6 +107,8 @@ function processEnvironment(): Record<string, string> {
     CODEX_CI: "1",
     LANG: process.env.LANG ?? "C.UTF-8",
     LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
+    ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
+    ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
   };
 }
 
@@ -326,7 +332,10 @@ export class ProcessSessionManager {
     const detached = process.platform !== "win32";
     const child = spawn(input.command, {
       cwd: input.cwd,
-      env: processEnvironment(),
+      env: processEnvironment({
+        workspaceId: input.workspaceId,
+        workspaceRoot: input.workspaceRoot,
+      }),
       stdio: "pipe",
       windowsHide: true,
       detached,
@@ -357,7 +366,10 @@ export class ProcessSessionManager {
     try {
       pty = nodePty.spawn(shell.executable, shell.args, {
         cwd: input.cwd,
-        env: processEnvironment(),
+        env: processEnvironment({
+          workspaceId: input.workspaceId,
+          workspaceRoot: input.workspaceRoot,
+        }),
         name: "xterm-256color",
         cols: session.columns,
         rows: session.rows,

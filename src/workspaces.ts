@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import type { WorkspaceMode, WorkspaceStore } from "./workspace-store.js";
-import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
@@ -15,8 +15,12 @@ import {
   type LoadedSkills,
   type SkillReadResolution,
 } from "./skills.js";
-import { walkWorkspace } from "./workspace-ignore.js";
+import {
+  loadLocalAgentProfiles,
+  type LocalAgentProfile,
+} from "./local-agent-profiles.js";
 import { decodeText } from "./text-codec.js";
+import { walkWorkspace } from "./workspace-ignore.js";
 
 export interface LoadedAgentsFile {
   path: string;
@@ -44,6 +48,7 @@ export interface Workspace {
   worktree?: WorkspaceWorktree;
   skills: LoadedSkills["skills"];
   skillDiagnostics: LoadedSkills["diagnostics"];
+  agentProfiles: LocalAgentProfile[];
   activatedSkillDirs: Set<string>;
 }
 
@@ -122,6 +127,7 @@ export class WorkspaceRegistry {
             }
           : undefined,
       ...this.loadSkillsForWorkspace(root),
+      agentProfiles: [],
       activatedSkillDirs: new Set(),
     };
     this.store?.touchSession(workspaceId);
@@ -211,6 +217,7 @@ export class WorkspaceRegistry {
       sourceRoot: input.sourceRoot,
       worktree: input.worktree,
       ...this.loadSkillsForWorkspace(input.root),
+      agentProfiles: await loadLocalAgentProfiles(this.config, input.root),
       activatedSkillDirs: new Set(),
     };
     const t1 = performance.now();

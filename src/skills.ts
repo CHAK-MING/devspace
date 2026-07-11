@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   loadSkills,
   parseFrontmatter,
@@ -22,15 +23,34 @@ export interface SkillReadResolution {
   isSkillFile: boolean;
 }
 
+const SUBAGENT_DELEGATION_NAME = "subagent-delegation";
+const SUBAGENT_DELEGATION_SKILL = join(SUBAGENT_DELEGATION_NAME, "SKILL.md");
+
+function bundledSkillsDir(): string {
+  return fileURLToPath(new URL("../skills", import.meta.url));
+}
+
+function hasSubagentDelegationSkill(skillDir: string): boolean {
+  return existsSync(join(skillDir, SUBAGENT_DELEGATION_SKILL));
+}
+
 export function effectiveSkillPaths(config: ServerConfig, cwd: string): string[] {
-  const defaultPaths = [
+  const bundledSkills = bundledSkillsDir();
+  const defaultPathCandidates = [
     join(homedir(), ".agents", "skills"),
     join(homedir(), ".claude", "skills"),
     resolve(cwd, ".agents", "skills"),
     resolve(cwd, ".claude", "skills"),
     resolve(cwd, ".codemaker", "skills"),
+    config.devspaceSkillsDir,
     join(config.agentDir, "skills"),
-  ].filter((path) => existsSync(path));
+    config.subagents && !hasSubagentDelegationSkill(config.devspaceSkillsDir)
+      ? bundledSkills
+      : undefined,
+  ];
+  const defaultPaths = defaultPathCandidates.filter(
+    (path): path is string => path !== undefined && existsSync(path),
+  );
 
   const seen = new Set<string>();
   return [...defaultPaths, ...config.skillPaths]
@@ -56,9 +76,17 @@ export function loadWorkspaceSkills(config: ServerConfig, cwd: string): LoadedSk
     includeDefaults: false,
   });
 
+  const skills = result.skills.map(redecodeSkillFrontmatter);
+  if (config.subagents) {
+    return { skills, diagnostics: result.diagnostics };
+  }
+
   return {
-    skills: result.skills.map(redecodeSkillFrontmatter),
-    diagnostics: result.diagnostics,
+    skills: skills.filter((skill) => skill.name !== SUBAGENT_DELEGATION_NAME),
+    diagnostics: result.diagnostics.filter((diagnostic) => {
+      const collision = diagnostic.collision;
+      return !(collision?.resourceType === "skill" && collision.name === SUBAGENT_DELEGATION_NAME);
+    }),
   };
 }
 
