@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
+import iconv from "iconv-lite";
 import { loadConfig } from "./config.js";
 import {
   effectiveSkillPaths,
@@ -32,6 +33,7 @@ try {
   await mkdir(join(agentDir, "skills", "global-skill"), { recursive: true });
   await mkdir(join(explicitSkills, "duplicate"), { recursive: true });
   await mkdir(join(explicitSkills, "disabled"), { recursive: true });
+  await mkdir(join(explicitSkills, "encoded"), { recursive: true });
 
   await writeFile(
     join(globalAgentsSkills, "agent-global-skill", "SKILL.md"),
@@ -122,6 +124,22 @@ try {
       "# Hidden Skill",
     ].join("\n"),
   );
+  await writeFile(
+    join(explicitSkills, "encoded", "SKILL.md"),
+    iconv.encode(
+      [
+        "---",
+        "name: encoded-skill",
+        "description: >-",
+        "  第一行",
+        "  第二行",
+        "---",
+        "",
+        "# Encoded Skill",
+      ].join("\n"),
+      "gb18030",
+    ),
+  );
 
   const disabledConfig = loadConfig({
     DEVSPACE_ALLOWED_ROOTS: projectRoot,
@@ -148,6 +166,10 @@ try {
   assert.equal(loaded.skills.some((skill) => skill.name === "project-skill"), false);
   assert.equal(loaded.skills.filter((skill) => skill.name === "duplicate-skill").length, 1);
   assert.equal(loaded.skills.some((skill) => skill.name === "hidden-skill"), true);
+  assert.equal(
+    loaded.skills.find((skill) => skill.name === "encoded-skill")?.description,
+    "第一行 第二行",
+  );
   assert.equal(loaded.diagnostics.some((diagnostic) => diagnostic.type === "collision"), true);
 
   const duplicateConfig = loadConfig({

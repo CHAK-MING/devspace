@@ -18,12 +18,14 @@ import express from "express";
 import type { Request, Response } from "express";
 import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
+import { createCheckpointManager, type CheckpointEvaluation } from "./checkpoints.js";
 import { loadConfig, type ServerConfig, type WidgetMode } from "./config.js";
 import {
+  commandPreview,
+  httpRequestLogLevel,
   logEvent,
   requestIp,
   requestPath,
-  commandPreview,
   sessionIdPrefix,
 } from "./logger.js";
 import {
@@ -148,6 +150,7 @@ const toolNames = {
   glob: "glob",
   ls: "ls",
   shell: "bash",
+  finishWorkspaceTask: "finish_workspace_task",
 } as const;
 
 interface ToolLogFields {
@@ -162,16 +165,28 @@ interface ToolLogFields {
   error?: string;
   stepMs?: Record<string, number>;
   filesScanned?: number;
+  // Checkpoint summary (finish_workspace_task only)
+  inspectionCount?: number;
+  inspectionScore?: number;
+  requiredInspectionScore?: number;
+  changedFilesCount?: number;
+  blockersCount?: number;
+  warningsCount?: number;
+  taskType?: string;
+  verificationCount?: number;
+  failedVerificationCount?: number;
+  reusedRootEvidence?: number;
 }
 
 function serverInstructions(config: ServerConfig): string {
+  const reasoningGuardrails = "Reasoning guardrails: for guarantee, counting, boundary, proof, or logic tasks, first identify observable facts, controllable actions, and the exact guarantee required. Exploit observable or controllable properties with staged/adaptive strategies; do not collapse them into blind sampling. Before final numeric/logical answers, prove worst-case sufficiency and a matching lower bound, then re-check arithmetic. Avoid optional progress commentary unless a tool call requires it or the user asks.\n\n";
   const showChangesInstruction =
     config.widgets === "changes"
       ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${showChangesInstruction}`;
+    return `${reasoningGuardrails}Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope. Before the final response for any coding task performed in a workspace, call ${toolNames.finishWorkspaceTask}. If it returns ready=false, continue working and complete the required actions instead of answering finally. Do not pause merely because the task is mostly complete. Pause only for irreversible or high-risk actions, material scope changes, or missing information that must be provided by the user.${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -179,12 +194,37 @@ function serverInstructions(config: ServerConfig): string {
     : `Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. `;
 
   const skills = config.skillsEnabled
-    ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
+    ? `Skills are first-class: when ${toolNames.openWorkspace} returns available skills, ALWAYS scan the list for any skill whose description matches the user's task, even partially, and use ${toolNames.read} to load that skill's SKILL.md (and any referenced files it points to) BEFORE doing the work. When multiple skills could apply, read the most specific one first. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. Treat a matched skill as mandatory context, not a suggestion — its workflow, checklists, IRON RULES, and output formats must be followed. `
     : "";
 
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${showChangesInstruction}`;
+  return `${reasoningGuardrails}You are operating inside DevSpace, a local coding workspace exposed over MCP. This is a large task: your job is to drive the user's request all the way to the result they actually need, not to stop at the first plausible-looking milestone. Think of yourself as owning the outcome, not just the next step.
+
+## Context
+Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId, then reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder. Do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}
+
+## Request
+Treat the user's request as the full contract. Every step it implies must actually be carried out, not described — never summarize work in place of doing it, and never hand back partial output with phrases like "you can finish the rest." Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. After any change, verify it (run the relevant tests, linter, type-check, or build) rather than assuming it is correct. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.
+
+## Output format
+${config.widgets === "changes" ? `When a turn modifies files (create/edit/overwrite/delete/move/patch), call show_changes exactly once for that workspace after the final related change and before your final response, so the user can inspect the aggregate diff. Do not call it after every individual change, and do not skip it.` : `When you finish, report what you changed, what you verified, and anything that still needs the user's attention — concretely, not in vague summaries.`}
+
+## Constraints
+- Do not make false assumptions. If a fact is unknown, investigate (read files, run commands) before acting on it.
+- Do not go beyond the requested scope. If following the request faithfully would require touching something outside it, surface that explicitly rather than silently expanding.
+- Do not produce low-quality output forms: no placeholder text, no TODO-only commits, no "this should work" without verification.
+- When information is genuinely insufficient to proceed correctly, mark the uncertainty explicitly and concretely (what is missing, what you assumed, what the user must confirm) rather than guessing and continuing.
+
+## Checkpoint — when to pause
+You are working on a large task. Do NOT pause just because a sub-step looks complete or the work feels "mostly done." Keep going until the user's actual goal is reached.
+
+Pause and ask the user ONLY in these three cases, and no others:
+1. **Irreversible action.** An operation that cannot be undone and carries real risk — e.g. deleting or overwriting files that are not under version control, force-pushing, publishing, deploying to production, dropping a database. Routine edits, test runs, and git operations on a committed state are NOT irreversible.
+2. **Scope change.** Faithfully completing the request would require work materially outside what was asked — a different module, a different system, a much larger change than requested. Surface it and confirm before expanding.
+3. **Missing information that only the user can provide.** Credentials, a preference, a decision between valid alternatives where the request does not imply one. Do NOT pause for things you can discover yourself by reading code, running tests, or checking the repo.
+
+If you reach a hard limit you cannot proceed past (token cap, the three cases above), say so explicitly and concretely — which case, what you need, what you have already done. Never end early by silent omission or truncate output to force a stop.`;
 }
 function resultOutputSchema(extra: z.ZodRawShape = {}): z.ZodRawShape {
   return {
@@ -225,6 +265,29 @@ const reviewSummaryOutputSchema = z.object({
   additions: z.number(),
   removals: z.number(),
 });
+
+const checkpointOutputSchema = {
+  ready: z.boolean(),
+  blockers: z.array(z.string()),
+  warnings: z.array(z.string()),
+  requiredActions: z.array(z.string()),
+  changedFiles: z.array(z.string()),
+  verificationCommands: z.array(z.string()),
+  failedVerificationCommands: z.array(z.string()),
+  status: z.enum(["ready", "blocked", "advisory"]),
+  inspectionCount: z.number(),
+  inspectionScore: z.number(),
+  requiredInspectionScore: z.number(),
+  evidenceKinds: z.array(z.string()),
+  missingEvidenceKinds: z.array(z.string()),
+  reusedRootEvidence: z.number(),
+  taskType: z.enum(["analysis", "diagnosis", "code_change"]),
+  context: z.array(z.string()),
+  request: z.array(z.string()),
+  outputFormat: z.array(z.string()),
+  constraints: z.array(z.string()),
+  checkpoint: z.array(z.string()),
+};
 
 function sendJsonRpcError(
   res: Response,
@@ -296,6 +359,92 @@ function logFailedToolResponse(
 
 function textBlock(text: string): ToolContent {
   return { type: "text", text };
+}
+
+function checkpointResultText(
+  evaluation: CheckpointEvaluation,
+  contract: CheckpointResponseContract,
+): string {
+  const lines = [
+    evaluation.ready ? "Ready to finish." : "Not ready to finish.",
+  ];
+  appendSection(lines, "Context", contract.context);
+  appendSection(lines, "Request", contract.request);
+  appendSection(lines, "Output format", contract.outputFormat);
+  appendSection(lines, "Constraints", contract.constraints);
+  appendSection(lines, "Checkpoint", contract.checkpoint);
+  appendSection(lines, "Blocking issues", evaluation.blockers);
+  appendSection(lines, "Required actions", evaluation.requiredActions);
+  appendSection(lines, "Warnings", evaluation.warnings);
+  appendSection(lines, "Changed files", evaluation.changedFiles);
+  appendSection(lines, "Successful verification commands", evaluation.verificationCommands);
+  appendSection(lines, "Failed verification commands", evaluation.failedVerificationCommands);
+  appendSection(lines, "Evidence kinds", evaluation.evidenceKinds);
+  appendSection(lines, "Missing evidence kinds", evaluation.missingEvidenceKinds);
+  lines.push(`Inspection score: ${evaluation.inspectionScore}/${evaluation.requiredInspectionScore} (raw count: ${evaluation.inspectionCount}).`);
+  if (evaluation.reusedRootEvidence > 0) lines.push(`Reused root evidence items: ${evaluation.reusedRootEvidence}.`);
+  return lines.join("\n");
+}
+
+interface CheckpointResponseContract {
+  context: string[];
+  request: string[];
+  outputFormat: string[];
+  constraints: string[];
+  checkpoint: string[];
+}
+
+function checkpointResponseContract(
+  evaluation: CheckpointEvaluation,
+  summary: string | undefined,
+  reviewDiffRequired: boolean,
+): CheckpointResponseContract {
+  return {
+    context: [
+      evaluation.changedFiles.length > 0
+        ? `Changed files recorded: ${evaluation.changedFiles.join(", ")}.`
+        : "No file modifications are recorded for this workspace checkpoint.",
+      evaluation.verificationCommands.length > 0
+        ? `Successful verification commands recorded after the latest change: ${evaluation.verificationCommands.join("; ")}.`
+        : "No successful verification command is recorded after the latest relevant change.",
+      evaluation.failedVerificationCommands.length > 0
+        ? `Failed verification commands recorded after the latest change: ${evaluation.failedVerificationCommands.join("; ")}.`
+        : "No failed verification command is recorded after the latest relevant change.",
+      reviewDiffRequired
+        ? "Review diff requirement: enabled; show_changes is required after file modifications."
+        : "Review diff requirement: not enforced because the changes widget is disabled.",
+      `Investigation evidence score: ${evaluation.inspectionScore}/${evaluation.requiredInspectionScore}; raw inspection count: ${evaluation.inspectionCount}.`,
+      evaluation.reusedRootEvidence > 0
+        ? `Reused read-only root evidence items: ${evaluation.reusedRootEvidence}.`
+        : "No read-only root evidence was reused for this checkpoint.",
+    ],
+    request: [
+      summary?.trim()
+        ? `Task summary provided to finish_workspace_task: ${summary.trim()}`
+        : "No explicit task summary was provided to finish_workspace_task; final response must stay grounded in the user's original request and the recorded workspace state.",
+    ],
+    outputFormat: [
+      "Final response must state what changed, which files changed, what verification was run, whether it passed, and any remaining uncertainty or risk.",
+      "Do not replace completed work with unperformed next steps or vague progress summaries.",
+    ],
+    constraints: [
+      "Do not make unsupported assumptions; inspect the workspace or explicitly mark uncertainty.",
+      "Do not exceed the user's requested scope.",
+      "Do not perform irreversible, destructive, or high-risk operations without user confirmation.",
+    ],
+    checkpoint: evaluation.ready
+      ? ["Checkpoint passed. It is acceptable to provide the final response if the requested outcome is actually achieved."]
+      : [
+          "Checkpoint failed. Do not provide the final response yet.",
+          "Continue working unless the next action is irreversible/high-risk, the task scope has materially changed, or required information must come from the user.",
+        ],
+  };
+}
+
+function appendSection(lines: string[], title: string, items: string[]): void {
+  if (items.length === 0) return;
+  lines.push(`${title}:`);
+  for (const item of items) lines.push(`- ${item}`);
 }
 
 function textSummary(content: ToolContent[]): {
@@ -454,6 +603,7 @@ function processResult(snapshot: ProcessSnapshot): string {
 function processOutputSchema(): z.ZodRawShape {
   return resultOutputSchema({
     sessionId: z.number().optional(),
+    command: z.string(),
     running: z.boolean(),
     exitCode: z.number().int().optional(),
     signal: z.string().optional(),
@@ -484,6 +634,7 @@ function processToolResponse(
     structuredContent: {
       result,
       sessionId: snapshot.sessionId,
+      command: snapshot.command,
       running: snapshot.running,
       exitCode: snapshot.exitCode,
       signal: snapshot.signal,
@@ -497,6 +648,7 @@ function registerCodexProcessTools(
   server: McpServer,
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
+  checkpoints: ReturnType<typeof createCheckpointManager>,
   processSessions: ProcessSessionManager,
 ): void {
   registerAppTool(
@@ -553,6 +705,9 @@ function registerCodexProcessTools(
         maxOutputTokens,
       });
 
+      if (!snapshot.running) {
+        checkpoints.recordShellCommand({ workspaceId, command: cmd, success: snapshot.exitCode === 0 });
+      }
       logToolCall(config, {
         tool: "exec_command",
         workspaceId,
@@ -618,6 +773,9 @@ function registerCodexProcessTools(
         maxOutputTokens,
       });
 
+      if (!snapshot.running) {
+        checkpoints.recordShellCommand({ workspaceId, command: snapshot.command, success: snapshot.exitCode === 0 });
+      }
       logToolCall(config, {
         tool: "write_stdin",
         workspaceId,
@@ -640,6 +798,7 @@ function createMcpServer(
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
   reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
+  checkpoints: ReturnType<typeof createCheckpointManager>,
   processSessions: ProcessSessionManager,
 ): McpServer {
   const server = new McpServer(
@@ -737,6 +896,12 @@ function createMcpServer(
     async ({ path, mode, baseRef }) => {
       const startedAt = performance.now();
       const { workspace, agentsFiles, availableAgentsFiles, stepMs, filesScanned } = await workspaces.openWorkspace({ path, mode, baseRef });
+      checkpoints.initializeWorkspace({
+        workspaceId: workspace.id,
+        root: workspace.root,
+        rootKey: workspace.sourceRoot ?? workspace.root,
+        freshnessKey: workspace.worktree?.baseSha,
+      });
       if (config.widgets === "changes") {
         void reviewCheckpoints.initializeWorkspace({
           workspaceId: workspace.id,
@@ -757,9 +922,11 @@ function createMcpServer(
       const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
       }));
+      const checkpointInstruction = "Before the final response for coding work in this workspace, call finish_workspace_task. If it returns ready=false, continue working and complete the required actions. Pause only for irreversible/high-risk actions, material scope changes, or missing user-provided information.";
+      const openWorkspaceReasoningGuardrails = "Reasoning guardrails: solve guarantee, counting, boundary, proof, and logic tasks from first principles. Identify controllable actions and observable facts, then prove worst-case sufficiency and a matching lower bound before giving a final numeric answer.\n\n";
       const instruction = config.skillsEnabled
-        ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
-        : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+        ? `${openWorkspaceReasoningGuardrails}Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. ${checkpointInstruction}`
+        : `${openWorkspaceReasoningGuardrails}Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. ${checkpointInstruction}`;
       const resultContent: ToolContent[] = [
         {
           type: "text" as const,
@@ -887,6 +1054,7 @@ function createMcpServer(
         return response;
       }
       workspaces.markReadPathLoaded(workspace, readPath);
+      checkpoints.recordInspection({ workspaceId, tool: toolNames.read, path: input.path });
 
       const summary = {
         ...textSummary(response.content),
@@ -958,6 +1126,7 @@ function createMcpServer(
         return response;
       }
 
+      checkpoints.recordModification({ workspaceId, tool: toolNames.write, files: [input.path] });
       const patch = newFilePatch(input.path, input.content);
       const stats = countDiffStats(patch);
       const summary = {
@@ -1045,6 +1214,7 @@ function createMcpServer(
         return response;
       }
 
+      checkpoints.recordModification({ workspaceId, tool: toolNames.edit, files: [input.path] });
       const stats = countDiffStats(
         response.details?.patch ?? response.details?.diff,
       );
@@ -1120,6 +1290,11 @@ function createMcpServer(
         const workspace = workspaces.getWorkspace(workspaceId);
         const applied = await applyPatch(workspace.root, patch);
         const paths = applied.files.map((file) => file.path).join(", ");
+        checkpoints.recordModification({
+          workspaceId,
+          tool: "apply_patch",
+          files: applied.files.map((file) => file.path),
+        });
         const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
         const content = [textBlock(result)];
         const displayPath = applied.files.length === 1
@@ -1186,6 +1361,7 @@ function createMcpServer(
           markReviewed: true,
         });
 
+        checkpoints.recordShowChanges({ workspaceId });
         const content = [textBlock(review.result)];
         logToolCall(config, {
           tool: "show_changes",
@@ -1227,14 +1403,20 @@ function createMcpServer(
           workspaceId: z
             .string()
             .describe("Workspace identifier returned by open_workspace."),
-          pattern: z.string().describe("Search pattern."),
+          pattern: z.string().describe("Search pattern. Treated as a regular expression unless literal=true."),
           path: z
             .string()
             .optional()
             .describe(
-              "Optional path or glob scope relative to the workspace root.",
+              "Optional file or directory scope relative to the workspace root.",
             ),
-          include: z.string().optional().describe("Optional include glob."),
+          include: z
+            .string()
+            .optional()
+            .describe("Optional file glob, for example '**/*.ts'."),
+          ignoreCase: z.boolean().optional().describe("Use case-insensitive matching."),
+          literal: z.boolean().optional().describe("Treat pattern as literal text instead of a regular expression."),
+          limit: z.number().int().positive().max(5000).optional().describe("Maximum number of matches to return."),
         },
         outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "search"),
@@ -1258,6 +1440,7 @@ function createMcpServer(
           return response;
         }
 
+        checkpoints.recordInspection({ workspaceId, tool: toolNames.grep, path: input.path ?? input.pattern });
         const summary = {
           pattern: input.pattern,
           scope: input.path ?? ".",
@@ -1328,6 +1511,7 @@ function createMcpServer(
           return response;
         }
 
+        checkpoints.recordInspection({ workspaceId, tool: toolNames.glob, path: input.path ?? input.pattern });
         const summary = {
           pattern: input.pattern,
           scope: input.path ?? ".",
@@ -1398,6 +1582,7 @@ function createMcpServer(
           return response;
         }
 
+        checkpoints.recordInspection({ workspaceId, tool: toolNames.ls, path: input.path });
         const summary = textSummary(response.content);
         logToolCall(config, {
           tool: toolNames.ls,
@@ -1474,6 +1659,10 @@ function createMcpServer(
       });
 
       if (response.isError) {
+        // Record failed shell commands to checkpoint too, so evaluate() can see
+        // failed verification commands (e.g. a failing `npm test`) instead of
+        // treating them as if they never ran.
+        checkpoints.recordShellCommand({ workspaceId, command: input.command, success: false });
         logFailedToolResponse(config, {
           tool: toolNames.shell,
           workspaceId,
@@ -1484,6 +1673,7 @@ function createMcpServer(
         return response;
       }
 
+      checkpoints.recordShellCommand({ workspaceId, command: input.command, success: true });
       const summary = {
         command: input.command,
         workingDirectory: workingDirectory ?? ".",
@@ -1518,8 +1708,80 @@ function createMcpServer(
   );
   }
 
+  registerAppTool(
+    server,
+    toolNames.finishWorkspaceTask,
+    {
+      title: "Finish workspace task",
+      description:
+        "Check whether a DevSpace coding task is ready for the final response. Call this before the final response for coding tasks. If ready=false, continue working and complete the required actions instead of answering finally. Only pause for irreversible/high-risk actions, material scope changes, or missing user-provided information.",
+      inputSchema: {
+        workspaceId: z
+          .string()
+          .describe("Workspace identifier returned by open_workspace."),
+        summary: z
+          .string()
+          .optional()
+          .describe("Optional concise summary of the intended final result."),
+        taskType: z
+          .enum(["code_change", "analysis", "diagnosis"])
+          .optional()
+          .describe("Nature of the task. If omitted, inferred from whether files were modified (code_change) or not (analysis)."),
+        verificationSteps: z
+          .array(z.string())
+          .optional()
+          .describe("Verification commands you actually ran (e.g. ['openspec validate ...', 'npm test']). The checkpoint matches these against executed bash commands to confirm they were run and succeeded. Use this for any project-specific validation tool not auto-detected by keyword."),
+      },
+      outputSchema: resultOutputSchema(checkpointOutputSchema),
+      _meta: {},
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspaceId, summary, taskType, verificationSteps }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      checkpoints.initializeWorkspace({
+        workspaceId,
+        root: workspace.root,
+        rootKey: workspace.sourceRoot ?? workspace.root,
+        freshnessKey: workspace.worktree?.baseSha,
+      });
+      const evaluation = checkpoints.evaluate({ workspaceId, taskType, verificationSteps });
+      const contract = checkpointResponseContract(evaluation, summary, config.widgets === "changes");
+      const result = checkpointResultText(evaluation, contract);
+      const content = [textBlock(result)];
+      logToolCall(config, {
+        tool: toolNames.finishWorkspaceTask,
+        workspaceId,
+        success: evaluation.ready,
+        durationMs: Math.round(performance.now() - startedAt),
+        error: evaluation.ready ? undefined : evaluation.blockers.join("; "),
+        inspectionCount: evaluation.inspectionCount,
+        inspectionScore: evaluation.inspectionScore,
+        requiredInspectionScore: evaluation.requiredInspectionScore,
+        changedFilesCount: evaluation.changedFiles.length,
+        blockersCount: evaluation.blockers.length,
+        warningsCount: evaluation.warnings.length,
+        taskType: evaluation.taskType,
+        verificationCount: evaluation.verificationCommands.length,
+        failedVerificationCount: evaluation.failedVerificationCommands.length,
+        reusedRootEvidence: evaluation.reusedRootEvidence,
+      });
+
+      if (evaluation.ready) checkpoints.resetTask({ workspaceId });
+
+      return {
+        content,
+        structuredContent: {
+          result,
+          ...evaluation,
+          ...contract,
+        },
+      };
+    },
+  );
+
   if (config.toolMode === "codex") {
-    registerCodexProcessTools(server, config, workspaces, processSessions);
+    registerCodexProcessTools(server, config, workspaces, checkpoints, processSessions);
   }
 
   return server;
@@ -1533,7 +1795,35 @@ export function createServer(config = loadConfig()): RunningServer {
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
   });
-  const transports = new Map<string, Transport>();
+  const SESSION_IDLE_TTL_MS = 10 * 60 * 1000;
+  const SESSION_CLEANUP_INTERVAL_MS = 60 * 1000;
+  const MAX_TRANSPORTS = 200;
+
+  interface ManagedTransport {
+    transport: Transport;
+    lastActivity: number;
+  }
+
+  const transports = new Map<string, ManagedTransport>();
+
+  const sessionCleanupTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [sid, managed] of transports) {
+      if (now - managed.lastActivity > SESSION_IDLE_TTL_MS) {
+        managed.transport.close().catch(() => {});
+      }
+    }
+    if (transports.size > MAX_TRANSPORTS) {
+      const sorted = [...transports.entries()].sort(
+        (a, b) => a[1].lastActivity - b[1].lastActivity,
+      );
+      const evictCount = transports.size - MAX_TRANSPORTS;
+      for (const [sid] of sorted.slice(0, evictCount)) {
+        transports.get(sid)?.transport.close().catch(() => {});
+      }
+    }
+  }, SESSION_CLEANUP_INTERVAL_MS);
+  sessionCleanupTimer.unref();
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
@@ -1545,6 +1835,11 @@ export function createServer(config = loadConfig()): RunningServer {
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
   const reviewCheckpoints = createReviewCheckpointManager();
+  const checkpoints = createCheckpointManager(undefined, {
+    requireShowChanges: config.widgets === "changes",
+    thresholds: config.checkpoint.thresholds,
+    rootEvidenceTtlMs: config.checkpoint.rootEvidenceTtlMs,
+  });
   const processSessions = new ProcessSessionManager();
 
   if (config.logging.trustProxy) {
@@ -1561,7 +1856,7 @@ export function createServer(config = loadConfig()): RunningServer {
       if (!config.logging.requests) return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
 
-      logEvent(config.logging, "info", "http_request", {
+      logEvent(config.logging, httpRequestLogLevel(path, res.statusCode), "http_request", {
         requestId,
         method: req.method,
         path,
@@ -1641,17 +1936,20 @@ export function createServer(config = loadConfig()): RunningServer {
       let transport: Transport | undefined;
 
       if (sessionId) {
-        transport = transports.get(sessionId);
-        if (!transport) {
+        const managed = transports.get(sessionId);
+        if (!managed) {
           sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
           return;
         }
+        managed.lastActivity = Date.now();
+        transport = managed.transport;
       } else if (initializeRequest) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {
-            if (transport) transports.set(newSessionId, transport);
-            logEvent(config.logging, "info", "mcp_session_created", {
+            if (transport)
+              transports.set(newSessionId, { transport, lastActivity: Date.now() });
+            logEvent(config.logging, "debug", "mcp_session_created", {
               requestId,
               sessionIdPrefix: sessionIdPrefix(newSessionId),
               ...requestLogFields(req, config),
@@ -1663,13 +1961,13 @@ export function createServer(config = loadConfig()): RunningServer {
           const closedSessionId = transport?.sessionId;
           if (closedSessionId) {
             transports.delete(closedSessionId);
-            logEvent(config.logging, "info", "mcp_session_closed", {
+            logEvent(config.logging, "debug", "mcp_session_closed", {
               sessionIdPrefix: sessionIdPrefix(closedSessionId),
             });
           }
         };
 
-        const server = createMcpServer(config, workspaces, reviewCheckpoints, processSessions);
+        const server = createMcpServer(config, workspaces, reviewCheckpoints, checkpoints, processSessions);
         await server.connect(transport);
       } else {
         sendJsonRpcError(res, 400, -32000, "No valid MCP session");
@@ -1695,6 +1993,7 @@ export function createServer(config = loadConfig()): RunningServer {
     close: () => {
       if (closed) return;
       closed = true;
+      clearInterval(sessionCleanupTimer);
       processSessions.shutdown();
       oauthProvider.close();
       workspaceStore.close?.();

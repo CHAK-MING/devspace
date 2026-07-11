@@ -19,30 +19,35 @@ async function readDirents(dir: string) {
 }
 
 function isIgnoredByStack(path: string, stack: IgnoreFrame[], isDir: boolean): boolean {
-  for (let i = stack.length - 1; i >= 0; i--) {
-    const frame = stack[i];
+  let ignored = false;
+  for (const frame of stack) {
     if (path !== frame.dir && !path.startsWith(frame.dir + sep)) continue;
     const rel = relative(frame.dir, path).split(sep).join("/");
     if (!rel || rel.startsWith("..")) continue;
     try {
-      if (frame.ig.ignores(rel)) return true;
-      if (isDir && frame.ig.ignores(rel + "/")) return true;
+      const result = frame.ig.test(isDir ? `${rel}/` : rel);
+      if (result.ignored) ignored = true;
+      else if (result.unignored) ignored = false;
     } catch {
       // malformed pattern; treat as non-matching
     }
   }
-  return false;
+  return ignored;
 }
 
 export async function walkWorkspace(
   directory: string,
-  visit: (path: string, entry: { name: string; isFile(): boolean; isDirectory(): boolean }) => Promise<void> | void,
+  visit: (
+    path: string,
+    entry: { name: string; isFile(): boolean; isDirectory(): boolean },
+  ) => Promise<boolean | void> | boolean | void,
   skippedDirs: Set<string>,
   alwaysVisitFiles?: Set<string>,
 ): Promise<void> {
-  async function recurse(dir: string, stack: IgnoreFrame[]): Promise<void> {
+  async function recurse(dir: string, stack: IgnoreFrame[]): Promise<boolean> {
     const entries: Entries = await readDirents(dir);
-    if (!entries) return;
+    if (!entries) return true;
+    entries.sort((a, b) => a.name.localeCompare(b.name));
 
     let childStack = stack;
     const hasIgnore = entries.some(
@@ -67,19 +72,20 @@ export async function walkWorkspace(
       if (entry.isDirectory()) {
         if (skippedDirs.has(entry.name)) continue;
         if (isIgnoredByStack(path, childStack, true)) continue;
-        await recurse(path, childStack);
+        if (!(await recurse(path, childStack))) return false;
         continue;
       }
 
       if (entry.isFile()) {
         if (alwaysVisitFiles?.has(entry.name)) {
-          await visit(path, entry);
+          if ((await visit(path, entry)) === false) return false;
           continue;
         }
         if (isIgnoredByStack(path, childStack, false)) continue;
-        await visit(path, entry);
+        if ((await visit(path, entry)) === false) return false;
       }
     }
+    return true;
   }
 
   await recurse(directory, []);

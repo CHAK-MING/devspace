@@ -126,7 +126,10 @@ npx @waishnav/devspace serve
 | `DEVSPACE_LOG_SHELL_COMMANDS` | `0` |
 | `DEVSPACE_TRUST_PROXY` | `0` |
 
-Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
+Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging. At the default `info`
+level, DevSpace keeps tool calls, non-MCP request summaries, and request errors.
+Successful `/mcp` transport requests and MCP session lifecycle events are logged
+at `debug` to avoid duplicating every tool call in normal operational logs.
 
 Set `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command
 previews in logs.

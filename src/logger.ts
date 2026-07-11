@@ -27,6 +27,16 @@ export function shouldLog(config: LoggingConfig, level: Exclude<LogLevel, "silen
   return LEVEL_WEIGHT[config.level] >= LEVEL_WEIGHT[level];
 }
 
+export function httpRequestLogLevel(
+  path: string,
+  status: number,
+): Exclude<LogLevel, "silent"> {
+  if (status >= 500) return "error";
+  if (status >= 400) return "warn";
+  if (path === "/mcp") return "debug";
+  return "info";
+}
+
 export function logEvent(
   config: LoggingConfig,
   level: Exclude<LogLevel, "silent">,

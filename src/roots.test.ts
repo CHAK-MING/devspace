@@ -20,9 +20,24 @@ assert.equal(
   resolve(home, "personal", "devspace"),
 );
 
+// ~ now expands to home before resolving; here it lands outside /workspace,
+// so the allowed-roots check rejects it (previously ~ was treated as a literal
+// directory name under cwd, which silently produced a wrong path).
+assert.throws(
+  () => resolveAllowedPath("~/file.txt", "/workspace", ["/workspace"]),
+  /Path is outside allowed roots/,
+);
+
+// When home is itself an allowed root, ~ expansion is accepted.
 assert.equal(
-  resolveAllowedPath("~/file.txt", "/workspace", ["/workspace"]),
-  resolve("/workspace", "~/file.txt"),
+  resolveAllowedPath("~/file.txt", "/workspace", [home]),
+  resolve(home, "file.txt"),
+);
+
+// Relative paths are still resolved against cwd (no ~ expansion).
+assert.equal(
+  resolveAllowedPath("file.txt", "/workspace", ["/workspace"]),
+  resolve("/workspace", "file.txt"),
 );
 
 if (process.platform === "win32") {

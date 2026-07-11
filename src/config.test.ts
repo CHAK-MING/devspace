@@ -48,7 +48,7 @@ assert.deepEqual(loadConfig(baseEnv).logging, {
   requests: true,
   assets: false,
   toolCalls: true,
-  shellCommands: false,
+  shellCommands: true,
   trustProxy: false,
 });
 
@@ -67,6 +67,26 @@ assert.equal(loadConfig({ ...baseEnv, DEVSPACE_LOG_TOOL_CALLS: "0" }).logging.to
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_LOG_SHELL_COMMANDS: "1" }).logging.shellCommands, true);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_TRUST_PROXY: "1" }).logging.trustProxy, true);
 
+assert.deepEqual(loadConfig(baseEnv).checkpoint.thresholds, {
+  analysis: 4,
+  diagnosis: 6,
+  codeChange: 8,
+});
+assert.equal(loadConfig(baseEnv).checkpoint.rootEvidenceTtlMs, 30 * 60 * 1000);
+assert.deepEqual(
+  loadConfig({
+    ...baseEnv,
+    DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_ANALYSIS: "2",
+    DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_DIAGNOSIS: "5",
+    DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_CODE_CHANGE: "9",
+    DEVSPACE_CHECKPOINT_ROOT_EVIDENCE_TTL_SECONDS: "60",
+  }).checkpoint,
+  {
+    thresholds: { analysis: 2, diagnosis: 5, codeChange: 9 },
+    rootEvidenceTtlMs: 60_000,
+  },
+);
+
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_LOG_LEVEL: "trace" }),
   /Invalid DEVSPACE_LOG_LEVEL: trace/,
@@ -75,6 +95,14 @@ assert.throws(
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_LOG_FORMAT: "color" }),
   /Invalid DEVSPACE_LOG_FORMAT: color/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_ANALYSIS: "0" }),
+  /Invalid DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_ANALYSIS: 0/,
+);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_CHECKPOINT_ROOT_EVIDENCE_TTL_SECONDS: "1.5" }),
+  /Invalid DEVSPACE_CHECKPOINT_ROOT_EVIDENCE_TTL_SECONDS: 1.5/,
 );
 
 assert.equal(loadConfig(baseEnv).oauth.ownerToken, "test-owner-token-that-is-long-enough");

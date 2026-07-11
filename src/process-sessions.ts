@@ -6,6 +6,8 @@ const DEFAULT_INTERACTIVE_YIELD_MS = 250;
 const DEFAULT_POLL_YIELD_MS = 5_000;
 const MAX_COMMAND_YIELD_MS = 30_000;
 const MAX_POLL_YIELD_MS = 110_000;
+// Keep the default response bounded for remote MCP transports. Callers that
+// genuinely need a larger result can raise maxOutputTokens per command.
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const DEFAULT_BUFFER_CHARACTERS = 1_000_000;
 const COMPLETED_SESSION_TTL_MS = 5 * 60 * 1_000;
@@ -35,6 +37,7 @@ export interface WriteStdinInput {
 
 export interface ProcessSnapshot {
   sessionId?: number;
+  command: string;
   output: string;
   outputTruncated: boolean;
   running: boolean;
@@ -52,6 +55,7 @@ interface ManagedProcess {
 interface ProcessSession {
   id: number;
   workspaceId: string;
+  command: string;
   process?: ManagedProcess;
   startedAt: number;
   columns: number;
@@ -306,6 +310,7 @@ export class ProcessSessionManager {
     return {
       id: this.nextSessionId++,
       workspaceId: input.workspaceId,
+      command: input.command,
       startedAt: Date.now(),
       columns: terminalSize(input.columns, DEFAULT_COLUMNS),
       rows: terminalSize(input.rows, DEFAULT_ROWS),
@@ -396,6 +401,7 @@ export class ProcessSessionManager {
 
     return {
       sessionId: session.running ? session.id : undefined,
+      command: session.command,
       output: buffered.output,
       outputTruncated: buffered.truncated,
       running: session.running,

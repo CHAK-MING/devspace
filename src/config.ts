@@ -9,6 +9,16 @@ export type ToolMode = "minimal" | "full" | "codex";
 export type WidgetMode = "off" | "changes" | "full";
 const DEFAULT_OAUTH_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const DEFAULT_OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DEFAULT_CHECKPOINT_ROOT_EVIDENCE_TTL_SECONDS = 30 * 60;
+
+export interface CheckpointConfig {
+  thresholds: {
+    analysis: number;
+    diagnosis: number;
+    codeChange: number;
+  };
+  rootEvidenceTtlMs: number;
+}
 
 export interface ServerConfig {
   host: string;
@@ -25,6 +35,7 @@ export interface ServerConfig {
   skillPaths: string[];
   agentDir: string;
   logging: LoggingConfig;
+  checkpoint: CheckpointConfig;
 }
 
 function parsePort(value: string | number | undefined): number {
@@ -139,8 +150,23 @@ function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
     requests: env.DEVSPACE_LOG_REQUESTS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_REQUESTS),
     assets: parseBoolean(env.DEVSPACE_LOG_ASSETS),
     toolCalls: env.DEVSPACE_LOG_TOOL_CALLS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_TOOL_CALLS),
-    shellCommands: parseBoolean(env.DEVSPACE_LOG_SHELL_COMMANDS),
+    shellCommands: env.DEVSPACE_LOG_SHELL_COMMANDS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_SHELL_COMMANDS),
     trustProxy: parseBoolean(env.DEVSPACE_TRUST_PROXY),
+  };
+}
+
+function parseCheckpointConfig(env: NodeJS.ProcessEnv): CheckpointConfig {
+  return {
+    thresholds: {
+      analysis: parsePositiveInteger(env.DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_ANALYSIS, 4, "DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_ANALYSIS"),
+      diagnosis: parsePositiveInteger(env.DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_DIAGNOSIS, 6, "DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_DIAGNOSIS"),
+      codeChange: parsePositiveInteger(env.DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_CODE_CHANGE, 8, "DEVSPACE_CHECKPOINT_MIN_INSPECTIONS_CODE_CHANGE"),
+    },
+    rootEvidenceTtlMs: parsePositiveInteger(
+      env.DEVSPACE_CHECKPOINT_ROOT_EVIDENCE_TTL_SECONDS,
+      DEFAULT_CHECKPOINT_ROOT_EVIDENCE_TTL_SECONDS,
+      "DEVSPACE_CHECKPOINT_ROOT_EVIDENCE_TTL_SECONDS",
+    ) * 1000,
   };
 }
 
@@ -227,6 +253,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     skillPaths: parsePathList(env.DEVSPACE_SKILL_PATHS),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
     logging: parseLoggingConfig(env),
+    checkpoint: parseCheckpointConfig(env),
   };
 }
 

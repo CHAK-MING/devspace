@@ -1,13 +1,15 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
   loadSkills,
+  parseFrontmatter,
   type Skill,
   type LoadSkillsResult,
 } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { expandHomePath, isPathInsideRoot } from "./roots.js";
+import { decodeText } from "./text-codec.js";
 
 export interface LoadedSkills {
   skills: Skill[];
@@ -47,12 +49,40 @@ function resolveSkillPath(path: string, cwd: string): string {
 export function loadWorkspaceSkills(config: ServerConfig, cwd: string): LoadedSkills {
   if (!config.skillsEnabled) return { skills: [], diagnostics: [] };
 
-  return loadSkills({
+  const result = loadSkills({
     cwd,
     agentDir: config.agentDir,
     skillPaths: effectiveSkillPaths(config, cwd),
     includeDefaults: false,
   });
+
+  return {
+    skills: result.skills.map(redecodeSkillFrontmatter),
+    diagnostics: result.diagnostics,
+  };
+}
+
+function redecodeSkillFrontmatter(skill: Skill): Skill {
+  try {
+    const content = decodeText(readFileSync(skill.filePath)).content;
+    const { frontmatter } = parseFrontmatter<Record<string, unknown>>(content);
+    const name = typeof frontmatter.name === "string" ? frontmatter.name : undefined;
+    const description = typeof frontmatter.description === "string"
+      ? frontmatter.description
+      : undefined;
+    const disableModelInvocation = typeof frontmatter["disable-model-invocation"] === "boolean"
+      ? frontmatter["disable-model-invocation"]
+      : undefined;
+
+    return {
+      ...skill,
+      name: name ?? skill.name,
+      description: description ?? skill.description,
+      disableModelInvocation: disableModelInvocation ?? skill.disableModelInvocation,
+    };
+  } catch {
+    return skill;
+  }
 }
 
 export function resolveSkillReadPath(

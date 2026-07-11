@@ -94,7 +94,9 @@ sessions.
 
 ## Logs
 
-By default, DevSpace logs requests and tool calls. Shell command previews are
-disabled unless `DEVSPACE_LOG_SHELL_COMMANDS=1`.
+By default, DevSpace logs tool calls, non-MCP request summaries, and request
+errors. Successful `/mcp` transport requests and MCP session lifecycle events
+are available at `debug` level. Shell command previews are disabled unless
+`DEVSPACE_LOG_SHELL_COMMANDS=1`.
 
 Do not enable shell command logging if commands may contain secrets.

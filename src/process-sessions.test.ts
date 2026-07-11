@@ -46,6 +46,7 @@ const foreground = await manager.start({
 assert.equal(foreground.running, false);
 assert.equal(foreground.exitCode, 0);
 assert.match(foreground.output, /foreground/);
+assert.equal(foreground.command, `${node} -e "console.log('foreground')"`);
 assert.equal(foreground.sessionId, undefined);
 
 const environment = await manager.start({
@@ -83,6 +84,7 @@ const completed = await manager.write({
 });
 assert.equal(completed.running, false);
 assert.equal(completed.exitCode, 0);
+assert.equal(completed.command, `${node} -e "setTimeout(() => console.log('finished'), 100)"`);
 assert.match(completed.output, /finished/);
 
 const interactive = await manager.start({
@@ -176,6 +178,15 @@ if (!buffered.outputTruncated && buffered.sessionId) {
 }
 assert.equal(buffered.outputTruncated, true);
 if (buffered.sessionId) manager.terminate("workspace-a", buffered.sessionId);
+
+const defaultLimited = await manager.start({
+  workspaceId: "workspace-a",
+  cwd: process.cwd(),
+  command: `${node} -e "console.log('y'.repeat(50000))"`,
+  yieldTimeMs: 2_000,
+});
+assert.equal(defaultLimited.running, false);
+assert.equal(defaultLimited.outputTruncated, true);
 
 try {
   if (process.platform === "win32") {

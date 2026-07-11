@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import iconv from "iconv-lite";
 import { applyPatch, isSamePatchFile, parsePatch, replaceFile } from "./apply-patch.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-apply-patch-"));
@@ -306,3 +307,20 @@ await assert.rejects(
   ),
   /not valid UTF-8|binary/,
 );
+
+const gbkRoot = await mkdtemp(join(tmpdir(), "devspace-apply-patch-gbk-"));
+const gbkFile = join(gbkRoot, "gbk.c");
+await writeFile(gbkFile, iconv.encode("第一行\n旧内容\n", "gb18030"));
+await applyPatch(
+  gbkRoot,
+  `*** Begin Patch
+*** Update File: gbk.c
+@@
+ 第一行
+-旧内容
++新内容
+*** End Patch`,
+);
+const gbkBytes = await readFile(gbkFile);
+assert.equal(iconv.decode(gbkBytes, "gb18030"), "第一行\n新内容\n");
+assert.throws(() => new TextDecoder("utf-8", { fatal: true }).decode(gbkBytes));

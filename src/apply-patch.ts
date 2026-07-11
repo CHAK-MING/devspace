@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { access, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { TextDecoder } from "node:util";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
+import { encodeText, readTextFileAuto, type TextEncoding } from "./text-codec.js";
 
 export type PatchOperation = "add" | "update" | "delete" | "move";
 
@@ -39,6 +39,7 @@ type PatchAction =
 interface TextFile {
   content: string;
   mode?: number;
+  encoding: TextEncoding;
 }
 
 type StagedTextFile = TextFile | null;
@@ -363,7 +364,7 @@ export async function applyPatch(root: string, patch: string): Promise<ApplyPatc
     if (action.kind === "add") {
       const absolute = await resolveConfinedPath(root, action.path);
       const original = await readStagedOptional(absolute, action.path);
-      staged.set(absolute, { content: action.content, mode: original?.mode });
+      staged.set(absolute, { content: action.content, mode: original?.mode, encoding: original?.encoding ?? "utf8" });
       patches.push(unifiedFilePatch(action.path, action.path, original?.content ?? null, action.content));
       results.push({ path: action.path, operation: "add" });
       continue;
@@ -385,19 +386,19 @@ export async function applyPatch(root: string, patch: string): Promise<ApplyPatc
       const samePatchFile = await isSamePatchFile(absolute, destination);
       if (!samePatchFile) await readStagedOptional(destination, action.moveTo);
       if (samePatchFile) staged.delete(absolute);
-      staged.set(destination, { content: updated, mode: file.mode });
+      staged.set(destination, { content: updated, mode: file.mode, encoding: file.encoding });
       if (!samePatchFile) staged.set(absolute, null);
       patches.push(unifiedFilePatch(action.path, action.moveTo, file.content, updated));
       results.push({ path: action.moveTo, previousPath: action.path, operation: "move" });
     } else {
-      staged.set(absolute, { content: updated, mode: file.mode });
+      staged.set(absolute, { content: updated, mode: file.mode, encoding: file.encoding });
       patches.push(unifiedFilePatch(action.path, action.path, file.content, updated));
       results.push({ path: action.path, operation: "update" });
     }
   }
 
   for (const [absolute, file] of staged) {
-    if (file) await writeTextFile(absolute, file.content, file.mode);
+    if (file) await writeTextFile(absolute, file.content, file.encoding, file.mode);
   }
 
   for (const [absolute, file] of staged) {
@@ -413,26 +414,20 @@ async function readOptionalTextFile(absolute: string, displayPath: string): Prom
   if (!(await fileExists(absolute))) return null;
   const metadata = await stat(absolute);
   if (!metadata.isFile()) throw patchError(`path is not a regular file: ${displayPath}`);
-  return { content: await readUtf8Text(absolute, displayPath), mode: metadata.mode };
-}
-
-async function readUtf8Text(absolute: string, displayPath: string): Promise<string> {
-  const bytes = await readFile(absolute);
-  let content: string;
   try {
-    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw patchError(`file is not valid UTF-8 text: ${displayPath}`);
+    const file = await readTextFileAuto(absolute);
+    return { content: file.content, mode: metadata.mode, encoding: file.encoding };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw patchError(`${message}: ${displayPath}`);
   }
-  if (content.includes("\0")) throw patchError(`file appears to be binary: ${displayPath}`);
-  return content;
 }
 
-async function writeTextFile(destination: string, content: string, mode?: number): Promise<void> {
+async function writeTextFile(destination: string, content: string, encoding: TextEncoding, mode?: number): Promise<void> {
   await mkdir(dirname(destination), { recursive: true });
   const temporary = `${destination}.devspace-patch-${process.pid}-${randomUUID()}`;
   try {
-    await writeFile(temporary, content, mode === undefined ? undefined : { mode });
+    await writeFile(temporary, encodeText(content, encoding), mode === undefined ? undefined : { mode });
     await replaceFile(temporary, destination, await fileExists(destination));
   } catch (error) {
     await rm(temporary, { force: true });

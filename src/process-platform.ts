@@ -47,6 +47,8 @@ export function resolveShellCommand(
   const configuredShell = environment.SHELL;
   const shellName = configuredShell ? basename(configuredShell) : "";
   if (configuredShell && LOGIN_SHELLS.has(shellName)) {
+    // Keep command execution non-interactive. Interactive startup files can
+    // print prompts or warnings and add substantial latency to every PTY call.
     return { executable: configuredShell, args: ["-lc", command] };
   }
   if (configuredShell && POSIX_SHELLS.has(shellName)) {

@@ -41,6 +41,8 @@ export function assertAllowedPath(path: string, allowedRoots: string[]): string 
 }
 
 export function resolveAllowedPath(inputPath: string, cwd: string, allowedRoots: string[]): string {
-  const absolutePath = resolve(cwd, inputPath);
+  // Expand ~ before resolving, otherwise `~` is treated as a literal directory
+  // name relative to cwd (e.g. /home/user/workspace/~/foo instead of /home/user/foo).
+  const absolutePath = resolve(cwd, expandHomePath(inputPath));
   return assertAllowedPath(absolutePath, allowedRoots);
 }
